@@ -101,12 +101,13 @@
   "## Download Model": "## 下载模型",
   "Model Link": "模型链接",
   "Introduce the model link": "介绍模型链接",
-  "Download Model": "Descargar Modelo",
+  "Download Model": "下载模型",
   "## Drop files": "## 删除文件",
   "Drag your .pth file and .index file into this space. Drag one and then the other.": "将 .pth 文件和 .index 文件拖到此空间中。拖动一个，然后拖动另一个。",
   "TTS Voices": "TTS语音",
   "Text to Synthesize": "要合成的文本",
   "Enter text to synthesize": "输入要合成的文本",
   "Output Path for TTS Audio": "TTS 音频的输出路径",
-  "Output Path for RVC Audio": "RVC 音频的输出路径"
+  "Output Path for RVC Audio": "RVC 音频的输出路径",
+  "Enable Applio integration with Discord presence": "Applio 存在"
 }

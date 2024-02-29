@@ -7,9 +7,14 @@ import scipy.signal as signal
 import pyworld, os, faiss, librosa, torchcrepe
 from scipy import signal
 from functools import lru_cache
+import random
+import gc
+import re
 
 now_dir = os.getcwd()
 sys.path.append(now_dir)
+
+from rvc.lib.FCPEF0Predictor import FCPEF0Predictor
 
 bh, ah = signal.butter(N=5, Wn=48, btype="high", fs=16000)
 
@@ -31,17 +36,21 @@ def cache_harvest_f0(input_audio_path, fs, f0max, f0min, frame_period):
 
 
 def change_rms(data1, sr1, data2, sr2, rate):
+    # print(data1.max(),data2.max())
     rms1 = librosa.feature.rms(y=data1, frame_length=sr1 // 2 * 2, hop_length=sr1 // 2)
     rms2 = librosa.feature.rms(y=data2, frame_length=sr2 // 2 * 2, hop_length=sr2 // 2)
+
     rms1 = torch.from_numpy(rms1)
     rms1 = F.interpolate(
         rms1.unsqueeze(0), size=data2.shape[0], mode="linear"
     ).squeeze()
+
     rms2 = torch.from_numpy(rms2)
     rms2 = F.interpolate(
         rms2.unsqueeze(0), size=data2.shape[0], mode="linear"
     ).squeeze()
     rms2 = torch.max(rms2, torch.zeros_like(rms2) + 1e-6)
+
     data2 *= (
         torch.pow(rms1, torch.tensor(1 - rate))
         * torch.pow(rms2, torch.tensor(rate - 1))
@@ -67,6 +76,45 @@ class VC(object):
         self.t_center = self.sr * self.x_center
         self.t_max = self.sr * self.x_max
         self.device = config.device
+        self.ref_freqs = [
+            65.41,
+            82.41,
+            110.00,
+            146.83,
+            196.00,
+            246.94,
+            329.63,
+            440.00,
+            587.33,
+            783.99,
+            1046.50,
+        ]
+        # Generate interpolated frequencies
+        self.note_dict = self.generate_interpolated_frequencies()
+
+    def generate_interpolated_frequencies(self):
+        # Generate interpolated frequencies based on the reference frequencies.
+        note_dict = []
+        for i in range(len(self.ref_freqs) - 1):
+            freq_low = self.ref_freqs[i]
+            freq_high = self.ref_freqs[i + 1]
+            # Interpolate between adjacent reference frequencies
+            interpolated_freqs = np.linspace(
+                freq_low, freq_high, num=10, endpoint=False
+            )
+            note_dict.extend(interpolated_freqs)
+        # Add the last reference frequency
+        note_dict.append(self.ref_freqs[-1])
+        return note_dict
+
+    def autotune_f0(self, f0):
+        # Autotunes the given fundamental frequency (f0) to the nearest musical note.
+        autotuned_f0 = np.zeros_like(f0)
+        for i, freq in enumerate(f0):
+            # Find the closest note
+            closest_note = min(self.note_dict, key=lambda x: abs(x - freq))
+            autotuned_f0[i] = closest_note
+        return autotuned_f0
 
     def get_optimal_torch_device(self, index: int = 0) -> torch.device:
         if torch.cuda.is_available():
@@ -81,7 +129,7 @@ class VC(object):
         f0_min,
         f0_max,
         p_len,
-        hop_length=120,
+        hop_length,
         model="full",
     ):
         x = x.astype(np.float32)
@@ -92,7 +140,6 @@ class VC(object):
         if audio.ndim == 2 and audio.shape[0] > 1:
             audio = torch.mean(audio, dim=0, keepdim=True).detach()
         audio = audio.detach()
-        print("Initiating prediction with a hop_length of: " + str(hop_length))
         pitch: Tensor = torchcrepe.predict(
             audio,
             self.sr,
@@ -141,6 +188,61 @@ class VC(object):
         f0 = f0[0].cpu().numpy()
         return f0
 
+    def get_f0_hybrid_computation(
+        self,
+        methods_str,
+        x,
+        f0_min,
+        f0_max,
+        p_len,
+        hop_length,
+    ):
+        methods_str = re.search("hybrid\[(.+)\]", methods_str)
+        if methods_str:
+            methods = [method.strip() for method in methods_str.group(1).split("+")]
+        f0_computation_stack = []
+        print(f"Calculating f0 pitch estimations for methods {str(methods)}")
+        x = x.astype(np.float32)
+        x /= np.quantile(np.abs(x), 0.999)
+        for method in methods:
+            f0 = None
+            if method == "crepe":
+                f0 = self.get_f0_crepe_computation(
+                    x, f0_min, f0_max, p_len, int(hop_length)
+                )
+            elif method == "rmvpe":
+                if hasattr(self, "model_rmvpe") == False:
+                    from rvc.lib.rmvpe import RMVPE
+
+                    self.model_rmvpe = RMVPE(
+                        "rmvpe.pt", is_half=self.is_half, device=self.device
+                    )
+                f0 = self.model_rmvpe.infer_from_audio(x, thred=0.03)
+                f0 = f0[1:]
+            elif method == "fcpe":
+                self.model_fcpe = FCPEF0Predictor(
+                    "fcpe.pt",
+                    f0_min=int(f0_min),
+                    f0_max=int(f0_max),
+                    dtype=torch.float32,
+                    device=self.device,
+                    sampling_rate=self.sr,
+                    threshold=0.03,
+                )
+                f0 = self.model_fcpe.compute_f0(x, p_len=p_len)
+                del self.model_fcpe
+                gc.collect()
+            f0_computation_stack.append(f0)
+
+        print(f"Calculating hybrid median f0 from the stack of {str(methods)}")
+        f0_computation_stack = [fc for fc in f0_computation_stack if fc is not None]
+        f0_median_hybrid = None
+        if len(f0_computation_stack) == 1:
+            f0_median_hybrid = f0_computation_stack[0]
+        else:
+            f0_median_hybrid = np.nanmedian(f0_computation_stack, axis=0)
+        return f0_median_hybrid
+
     def get_f0(
         self,
         input_audio_path,
@@ -150,6 +252,7 @@ class VC(object):
         f0_method,
         filter_radius,
         hop_length,
+        f0autotune,
         inp_f0=None,
     ):
         global input_audio_path2wav
@@ -205,6 +308,32 @@ class VC(object):
                     "rmvpe.pt", is_half=self.is_half, device=self.device
                 )
             f0 = self.model_rmvpe.infer_from_audio(x, thred=0.03)
+        elif f0_method == "fcpe":
+            self.model_fcpe = FCPEF0Predictor(
+                "fcpe.pt",
+                f0_min=int(f0_min),
+                f0_max=int(f0_max),
+                dtype=torch.float32,
+                device=self.device,
+                sampling_rate=self.sr,
+                threshold=0.03,
+            )
+            f0 = self.model_fcpe.compute_f0(x, p_len=p_len)
+            del self.model_fcpe
+            gc.collect()
+        elif "hybrid" in f0_method:
+            input_audio_path2wav[input_audio_path] = x.astype(np.double)
+            f0 = self.get_f0_hybrid_computation(
+                f0_method,
+                x,
+                f0_min,
+                f0_max,
+                p_len,
+                hop_length,
+            )
+
+        if f0autotune == "True":
+            f0 = self.autotune_f0(f0)
 
         f0 *= pow(2, f0_up_key / 12)
         tf0 = self.sr // self.window
@@ -345,6 +474,7 @@ class VC(object):
         version,
         protect,
         hop_length,
+        f0autotune,
         f0_file=None,
     ):
         if file_index != "" and os.path.exists(file_index) == True and index_rate != 0:
@@ -400,6 +530,7 @@ class VC(object):
                 f0_method,
                 filter_radius,
                 hop_length,
+                f0autotune,
                 inp_f0,
             )
             pitch = pitch[:p_len]

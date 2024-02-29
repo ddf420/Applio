@@ -2,8 +2,6 @@ import os
 import torch
 from collections import OrderedDict
 
-logs_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "logs")
-
 
 def replace_keys_in_dict(d, old_key_part, new_key_part):
     # Use OrderedDict if the original is an OrderedDict
@@ -21,71 +19,26 @@ def replace_keys_in_dict(d, old_key_part, new_key_part):
     return updated_dict
 
 
-def save_final(ckpt, sr, if_f0, name, epoch, version, hps):
-    try:
-        pth_file = f"{name}_{epoch}e.pth"
-        pth_file_path = os.path.join("logs", pth_file)
-        pth_file_old_version_path = os.path.join("logs", f"{pth_file}_old_version.pth")
-
-        opt = OrderedDict(
-            weight={
-                key: value.half() for key, value in ckpt.items() if "enc_q" not in key
-            }
-        )
-        opt["config"] = [
-            hps.data.filter_length // 2 + 1,
-            32,
-            hps.model.inter_channels,
-            hps.model.hidden_channels,
-            hps.model.filter_channels,
-            hps.model.n_heads,
-            hps.model.n_layers,
-            hps.model.kernel_size,
-            hps.model.p_dropout,
-            hps.model.resblock,
-            hps.model.resblock_kernel_sizes,
-            hps.model.resblock_dilation_sizes,
-            hps.model.upsample_rates,
-            hps.model.upsample_initial_channel,
-            hps.model.upsample_kernel_sizes,
-            hps.model.spk_embed_dim,
-            hps.model.gin_channels,
-            hps.data.sampling_rate,
-        ]
-        opt["info"], opt["sr"], opt["f0"], opt["version"] = epoch, sr, if_f0, version
-        torch.save(opt, pth_file_path)
-
-        model = torch.load(pth_file_path, map_location=torch.device("cpu"))
-        torch.save(
-            replace_keys_in_dict(
-                replace_keys_in_dict(
-                    model, ".parametrizations.weight.original1", ".weight_v"
-                ),
-                ".parametrizations.weight.original0",
-                ".weight_g",
-            ),
-            pth_file_old_version_path,
-        )
-        os.remove(pth_file_path)
-        os.rename(pth_file_old_version_path, pth_file_path)
-
-        return "Success!"
-    except Exception as error:
-        print(error)
-
-
-def extract_small_model(path, name, sr, if_f0, info, version):
+def extract_small_model(path, name, sr, if_f0, version):
     try:
         ckpt = torch.load(path, map_location="cpu")
-        if "model" in ckpt:
-            ckpt = ckpt["model"]
+        pth_file = f"{name}.pth"
+        pth_file_old_version_path = os.path.join("logs", f"{pth_file}_old_version.pth")
         opt = OrderedDict(
             weight={
                 key: value.half() for key, value in ckpt.items() if "enc_q" not in key
             }
         )
-        opt["config"] = {
-            "40000": [
+        if "model" in ckpt:
+            ckpt = ckpt["model"]
+        opt = OrderedDict()
+        opt["weight"] = {}
+        for key in ckpt.keys():
+            if "enc_q" in key:
+                continue
+            opt["weight"][key] = ckpt[key].half()
+        if sr == "40k":
+            opt["config"] = [
                 1025,
                 32,
                 192,
@@ -104,9 +57,10 @@ def extract_small_model(path, name, sr, if_f0, info, version):
                 109,
                 256,
                 40000,
-            ],
-            "48000": {
-                "v1": [
+            ]
+        elif sr == "48k":
+            if version == "v1":
+                opt["config"] = [
                     1025,
                     32,
                     192,
@@ -125,8 +79,9 @@ def extract_small_model(path, name, sr, if_f0, info, version):
                     109,
                     256,
                     48000,
-                ],
-                "v2": [
+                ]
+            else:
+                opt["config"] = [
                     1025,
                     32,
                     192,
@@ -145,10 +100,10 @@ def extract_small_model(path, name, sr, if_f0, info, version):
                     109,
                     256,
                     48000,
-                ],
-            },
-            "32000": {
-                "v1": [
+                ]
+        elif sr == "32k":
+            if version == "v1":
+                opt["config"] = [
                     513,
                     32,
                     192,
@@ -167,8 +122,9 @@ def extract_small_model(path, name, sr, if_f0, info, version):
                     109,
                     256,
                     32000,
-                ],
-                "v2": [
+                ]
+            else:
+                opt["config"] = [
                     513,
                     32,
                     192,
@@ -187,35 +143,26 @@ def extract_small_model(path, name, sr, if_f0, info, version):
                     109,
                     256,
                     32000,
-                ],
-            },
-        }
-        opt["config"] = (
-            opt["config"][sr]
-            if isinstance(opt["config"][sr], list)
-            else opt["config"][sr][version]
-        )
-        if info == "":
-            info = "Extracted model."
-        opt["info"], opt["version"], opt["sr"], opt["f0"] = (
-            info,
-            version,
-            sr,
-            int(if_f0),
-        )
-        torch.save(opt, f"logs/weights/{name}.pth")
-        return "Success."
-    except Exception as error:
-        print(error)
+                ]
 
+        opt["info"] = "Extracted model."
+        opt["version"] = version
+        opt["sr"] = sr
+        opt["f0"] = int(if_f0)
+        torch.save(opt, pth_file_old_version_path)
 
-def change_info(path, info, name):
-    try:
-        ckpt = torch.load(path, map_location="cpu")
-        ckpt["info"] = info
-        if name == "":
-            name = os.path.basename(path)
-        torch.save(ckpt, f"logs/weights/{name}")
-        return "Success."
+        model = torch.load(pth_file_old_version_path, map_location=torch.device("cpu"))
+        torch.save(
+            replace_keys_in_dict(
+                replace_keys_in_dict(
+                    model, ".parametrizations.weight.original1", ".weight_v"
+                ),
+                ".parametrizations.weight.original0",
+                ".weight_g",
+            ),
+            pth_file_old_version_path,
+        )
+        os.remove(pth_file_old_version_path)
+        os.rename(pth_file_old_version_path, pth_file)
     except Exception as error:
         print(error)

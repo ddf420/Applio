@@ -4,8 +4,11 @@ import wget
 import zipfile
 from bs4 import BeautifulSoup
 import requests
-from urllib.parse import unquote
+from urllib.parse import unquote, urlencode, parse_qs, urlparse
 import re
+import shutil
+import six
+
 
 def find_folder_parent(search_dir, folder_name):
     for dirpath, dirnames, _ in os.walk(search_dir):
@@ -13,10 +16,13 @@ def find_folder_parent(search_dir, folder_name):
             return os.path.abspath(dirpath)
     return None
 
+
 now_dir = os.getcwd()
 sys.path.append(now_dir)
 
-import rvc.lib.tools.gdown as gdown
+from rvc.lib.utils import format_title
+
+from rvc.lib.tools import gdown
 
 file_path = find_folder_parent(now_dir, "logs")
 
@@ -68,7 +74,7 @@ def download_from_url(url):
                 try:
                     gdown.download(
                         f"https://drive.google.com/uc?id={file_id}",
-                        quiet=False,
+                        quiet=True,
                         fuzzy=True,
                     )
                 except Exception as error:
@@ -88,7 +94,60 @@ def download_from_url(url):
                         print(error_message)
                         os.chdir(now_dir)
                         return None
+        elif "disk.yandex.ru" in url:
+            base_url = "https://cloud-api.yandex.net/v1/disk/public/resources/download?"
+            public_key = url
+            final_url = base_url + urlencode(dict(public_key=public_key))
+            response = requests.get(final_url)
+            download_url = response.json()["href"]
+            download_response = requests.get(download_url)
 
+            if download_response.status_code == 200:
+                filename = parse_qs(urlparse(unquote(download_url)).query).get(
+                    "filename", [""]
+                )[0]
+                if filename:
+                    os.chdir(zips_path)
+                    with open(filename, "wb") as f:
+                        f.write(download_response.content)
+            else:
+                print("Failed to get filename from URL.")
+                return None
+
+        elif "pixeldrain.com" in url:
+            try:
+                file_id = url.split("pixeldrain.com/u/")[1]
+                os.chdir(zips_path)
+                print(file_id)
+                response = requests.get(f"https://pixeldrain.com/api/file/{file_id}")
+                if response.status_code == 200:
+                    file_name = (
+                        response.headers.get("Content-Disposition")
+                        .split("filename=")[-1]
+                        .strip('";')
+                    )
+                    os.makedirs(zips_path, exist_ok=True)
+                    with open(os.path.join(zips_path, file_name), "wb") as newfile:
+                        newfile.write(response.content)
+                        os.chdir(file_path)
+                        return "downloaded"
+                else:
+                    os.chdir(file_path)
+                    return None
+            except Exception as e:
+                print(e)
+                os.chdir(file_path)
+                return None
+
+        elif "cdn.discordapp.com" in url:
+            file = requests.get(url)
+            os.chdir(zips_path)
+            if file.status_code == 200:
+                name = url.split("/")
+                with open(os.path.join(name[-1]), "wb") as newfile:
+                    newfile.write(file.content)
+            else:
+                return None
         elif "/blob/" in url or "/resolve/" in url:
             os.chdir(zips_path)
             if "/blob/" in url:
@@ -96,11 +155,12 @@ def download_from_url(url):
 
             response = requests.get(url, stream=True)
             if response.status_code == 200:
-                file_name = url.split("/")[-1]
-                file_name = unquote(file_name)
-
-                file_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", file_name)
-
+                content_disposition = six.moves.urllib_parse.unquote(
+                    response.headers["Content-Disposition"]
+                )
+                m = re.search(r'filename="([^"]+)"', content_disposition)
+                file_name = m.groups()[0]
+                file_name = file_name.replace(os.path.sep, "_")
                 total_size_in_bytes = int(response.headers.get("content-length", 0))
                 block_size = 1024
                 progress_bar_length = 50
@@ -195,6 +255,7 @@ def unzip_file(zip_path, zip_file_name):
 
 
 url = sys.argv[1]
+
 verify = download_from_url(url)
 
 if verify == "downloaded":
@@ -204,20 +265,75 @@ if verify == "downloaded":
             zipfile_path = os.path.join(zips_path, filename)
             print("Proceeding with the extraction...")
 
-            model_name = os.path.basename(zipfile_path)
+            model_zip = os.path.basename(zipfile_path)
+            model_name = format_title(model_zip.split(".zip")[0])
             extract_folder_path = os.path.join(
                 "logs",
-                os.path.normpath(str(model_name).replace(".zip", "")),
+                os.path.normpath(model_name),
             )
 
             success = extract_and_show_progress(zipfile_path, extract_folder_path)
+
+            subfolders = [
+                f
+                for f in os.listdir(extract_folder_path)
+                if os.path.isdir(os.path.join(extract_folder_path, f))
+            ]
+            if len(subfolders) == 1:
+                subfolder_path = os.path.join(extract_folder_path, subfolders[0])
+                for item in os.listdir(subfolder_path):
+                    s = os.path.join(subfolder_path, item)
+                    d = os.path.join(extract_folder_path, item)
+                    shutil.move(s, d)
+                os.rmdir(subfolder_path)
+
+            for item in os.listdir(extract_folder_path):
+                if ".pth" in item:
+                    file_name = item.split(".pth")[0]
+                    if file_name != model_name:
+                        os.rename(
+                            os.path.join(extract_folder_path, item),
+                            os.path.join(extract_folder_path, model_name + ".pth"),
+                        )
+                else:
+                    if "v2" not in item:
+                        file_name = item.split("_nprobe_1_")[1].split("_v1")[0]
+                        if file_name != model_name:
+                            new_file_name = (
+                                item.split("_nprobe_1_")[0]
+                                + "_nprobe_1_"
+                                + model_name
+                                + "_v1"
+                            )
+                            os.rename(
+                                os.path.join(extract_folder_path, item),
+                                os.path.join(
+                                    extract_folder_path, new_file_name + ".index"
+                                ),
+                            )
+                    else:
+                        file_name = item.split("_nprobe_1_")[1].split("_v2")[0]
+                        if file_name != model_name:
+                            new_file_name = (
+                                item.split("_nprobe_1_")[0]
+                                + "_nprobe_1_"
+                                + model_name
+                                + "_v2"
+                            )
+                            os.rename(
+                                os.path.join(extract_folder_path, item),
+                                os.path.join(
+                                    extract_folder_path, new_file_name + ".index"
+                                ),
+                            )
+
             if success:
                 print(f"Model {model_name} downloaded!")
             else:
                 print(f"Error downloading {model_name}")
                 sys.exit()
     if extract_folder_path == "":
-        print("No zip founded...")
+        print("Zip file was not found.")
         sys.exit()
     result = search_pth_index(extract_folder_path)
 else:

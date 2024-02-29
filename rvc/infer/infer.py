@@ -1,9 +1,14 @@
 import os
 import sys
+import time
 import torch
+import logging
+
 import numpy as np
 import soundfile as sf
-from vc_infer_pipeline import VC
+from pipeline import VC
+from scipy.io import wavfile
+import noisereduce as nr
 from rvc.lib.utils import load_audio
 from rvc.lib.tools.split_audio import process_audio, merge_audio
 from fairseq import checkpoint_utils
@@ -13,12 +18,11 @@ from rvc.lib.infer_pack.models import (
     SynthesizerTrnMs768NSFsid,
     SynthesizerTrnMs768NSFsid_nono,
 )
-
 from rvc.configs.config import Config
 
-config = Config()
+logging.getLogger("fairseq").setLevel(logging.WARNING)
 
-torch.manual_seed(114514)
+config = Config()
 hubert_model = None
 
 
@@ -37,6 +41,20 @@ def load_hubert():
     hubert_model.eval()
 
 
+def remove_audio_noise(input_audio_path, reduction_strength=0.7):
+    try:
+        rate, data = wavfile.read(input_audio_path)
+        reduced_noise = nr.reduce_noise(
+            y=data,
+            sr=rate,
+            prop_decrease=reduction_strength,
+        )
+        return reduced_noise
+    except Exception as error:
+        print(f"Error cleaning audio: {error}")
+        return None
+
+
 def vc_single(
     sid=0,
     input_audio_path=None,
@@ -46,11 +64,12 @@ def vc_single(
     file_index=None,
     index_rate=None,
     resample_sr=0,
-    rms_mix_rate=1,
-    protect=0.33,
+    rms_mix_rate=None,
+    protect=None,
     hop_length=None,
     output_path=None,
     split_audio=False,
+    f0autotune=False,
 ):
     global tgt_sr, net_g, vc, hubert_model, version
 
@@ -95,7 +114,7 @@ def vc_single(
                 ]
             try:
                 for path in paths:
-                    info, opt = vc_single(
+                    vc_single(
                         sid,
                         path,
                         f0_up_key,
@@ -109,17 +128,18 @@ def vc_single(
                         hop_length,
                         path,
                         False,
+                        f0autotune,
                     )
-                    # new_dir_path
             except Exception as error:
                 print(error)
-                return "Error", None
+                return f"Error {error}"
             print("Finished processing segmented audio, now merging audio...")
             merge_timestamps_file = os.path.join(
                 os.path.dirname(new_dir_path),
                 f"{os.path.basename(input_audio_path).split('.')[0]}_timestamps.txt",
             )
             tgt_sr, audio_opt = merge_audio(merge_timestamps_file)
+            os.remove(merge_timestamps_file)
 
         else:
             audio_opt = vc.pipeline(
@@ -140,6 +160,7 @@ def vc_single(
                 version,
                 protect,
                 hop_length,
+                f0autotune,
                 f0_file=f0_file,
             )
 
@@ -158,7 +179,7 @@ def get_vc(weight_root, sid):
         global hubert_model
         if hubert_model is not None:
             print("clean_empty_cache")
-            del net_g, n_spk, vc, hubert_model, tgt_sr  # ,cpt
+            del net_g, n_spk, vc, hubert_model, tgt_sr
             hubert_model = net_g = n_spk = vc = hubert_model = tgt_sr = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -216,49 +237,47 @@ filter_radius = sys.argv[2]
 index_rate = float(sys.argv[3])
 hop_length = sys.argv[4]
 f0method = sys.argv[5]
-
 audio_input_path = sys.argv[6]
 audio_output_path = sys.argv[7]
-
 model_path = sys.argv[8]
 index_path = sys.argv[9]
-try:
-    split_audio = sys.argv[10]
-except IndexError:
-    split_audio = None
-
-sid = f0up_key
-input_audio = audio_input_path
-f0_pitch = f0up_key
-f0_file = None
-f0_method = f0method
-file_index = index_path
-index_rate = index_rate
-output_file = audio_output_path
-split_audio = split_audio
+split_audio = sys.argv[10]
+f0autotune = sys.argv[11]
+rms_mix_rate = float(sys.argv[12])
+protect = float(sys.argv[13])
+clean_audio = sys.argv[14]
+clean_strength = float(sys.argv[15])
 
 get_vc(model_path, 0)
 
 try:
-    result, audio_opt = vc_single(
+    start_time = time.time()
+    vc_single(
         sid=0,
-        input_audio_path=input_audio,
-        f0_up_key=f0_pitch,
+        input_audio_path=audio_input_path,
+        f0_up_key=f0up_key,
         f0_file=None,
-        f0_method=f0_method,
-        file_index=file_index,
+        f0_method=f0method,
+        file_index=index_path,
         index_rate=index_rate,
+        rms_mix_rate=rms_mix_rate,
+        protect=protect,
         hop_length=hop_length,
-        output_path=output_file,
+        output_path=audio_output_path,
         split_audio=split_audio,
+        f0autotune=f0autotune,
     )
 
-    if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-        message = result
-    else:
-        message = result
+    if clean_audio == "True":
+        cleaned_audio = remove_audio_noise(audio_output_path, clean_strength)
+        if cleaned_audio is not None:
+            sf.write(audio_output_path, cleaned_audio, tgt_sr, format="WAV")
 
-    print(f"Conversion completed. Output file: '{output_file}'")
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(
+        f"Conversion completed. Output file: '{audio_output_path}' in {elapsed_time:.2f} seconds."
+    )
 
 except Exception as error:
     print(f"Voice conversion failed: {error}")

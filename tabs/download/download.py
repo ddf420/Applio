@@ -41,7 +41,7 @@ def save_drop_model(dropbox):
             os.makedirs(model_path)
         if os.path.exists(os.path.join(model_path, file_name)):
             os.remove(os.path.join(model_path, file_name))
-        os.rename(dropbox, os.path.join(model_path, file_name))
+        shutil.move(dropbox, os.path.join(model_path, file_name))
         print(f"{file_name} saved in {model_path}")
         gr.Info(f"{file_name} saved in {model_path}")
     return None
@@ -57,6 +57,7 @@ def download_tab():
         )
         model_download_output_info = gr.Textbox(
             label=i18n("Output Information"),
+            info=i18n("The output information will be displayed here."),
             value="",
             max_lines=8,
             interactive=False,

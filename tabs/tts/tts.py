@@ -2,8 +2,6 @@ import os, sys
 import gradio as gr
 import regex as re
 import json
-import shutil
-import datetime
 import random
 
 from core import (
@@ -18,26 +16,7 @@ now_dir = os.getcwd()
 sys.path.append(now_dir)
 
 model_root = os.path.join(now_dir, "logs")
-audio_root = os.path.join(now_dir, "assets", "audios")
-
 model_root_relative = os.path.relpath(model_root, now_dir)
-audio_root_relative = os.path.relpath(audio_root, now_dir)
-
-sup_audioext = {
-    "wav",
-    "mp3",
-    "flac",
-    "ogg",
-    "opus",
-    "m4a",
-    "mp4",
-    "aac",
-    "alac",
-    "wma",
-    "aiff",
-    "webm",
-    "ac3",
-}
 
 names = [
     os.path.join(root, file)
@@ -54,15 +33,6 @@ indexes_list = [
     for root, _, files in os.walk(model_root_relative, topdown=False)
     for name in files
     if name.endswith(".index") and "trained" not in name
-]
-
-audio_paths = [
-    os.path.join(root, name)
-    for root, _, files in os.walk(audio_root_relative, topdown=False)
-    for name in files
-    if name.endswith(tuple(sup_audioext))
-    and root == audio_root_relative
-    and "_output" not in name
 ]
 
 
@@ -83,19 +53,9 @@ def change_choices():
         for name in files
         if name.endswith(".index") and "trained" not in name
     ]
-
-    audio_paths = [
-        os.path.join(root, name)
-        for root, _, files in os.walk(audio_root_relative, topdown=False)
-        for name in files
-        if name.endswith(tuple(sup_audioext))
-        and root == audio_root_relative
-        and "_output" not in name
-    ]
     return (
         {"choices": sorted(names), "__type__": "update"},
         {"choices": sorted(indexes_list), "__type__": "update"},
-        {"choices": sorted(audio_paths), "__type__": "update"},
     )
 
 
@@ -110,85 +70,21 @@ def get_indexes():
     return indexes_list if indexes_list else ""
 
 
-def match_index(model_file: str) -> tuple:
-    model_files_trip = re.sub(r"\.pth|\.onnx$", "", model_file)
-    model_file_name = os.path.split(model_files_trip)[
-        -1
-    ]  # Extract only the name, not the directory
+def process_input(file_path):
+    with open(file_path, "r") as file:
+        file_contents = file.read()
+    gr.Info(f"The text from the txt file has been loaded!")
+    return file_contents, None
 
-    # Check if the sid0strip has the specific ending format _eXXX_sXXX
-    if re.match(r".+_e\d+_s\d+$", model_file_name):
-        base_model_name = model_file_name.rsplit("_", 2)[0]
-    else:
-        base_model_name = model_file_name
 
-    sid_directory = os.path.join(model_root_relative, base_model_name)
-    directories_to_search = [sid_directory] if os.path.exists(sid_directory) else []
-    directories_to_search.append(model_root_relative)
-
-    matching_index_files = []
-
-    for directory in directories_to_search:
-        for filename in os.listdir(directory):
-            if filename.endswith(".index") and "trained" not in filename:
-                # Condition to match the name
-                name_match = any(
-                    name.lower() in filename.lower()
-                    for name in [model_file_name, base_model_name]
-                )
-
-                # If in the specific directory, it's automatically a match
-                folder_match = directory == sid_directory
-
-                if name_match or folder_match:
-                    index_path = os.path.join(directory, filename)
-                    if index_path in indexes_list:
-                        matching_index_files.append(
-                            (
-                                index_path,
-                                os.path.getsize(index_path),
-                                " " not in filename,
-                            )
-                        )
-
-    if matching_index_files:
-        # Sort by favoring files without spaces and by size (largest size first)
-        matching_index_files.sort(key=lambda x: (-x[2], -x[1]))
-        best_match_index_path = matching_index_files[0][0]
-        return best_match_index_path
-
+def match_index(model_file_value):
+    if model_file_value:
+        model_folder = os.path.dirname(model_file_value)
+        index_files = get_indexes()
+        for index_file in index_files:
+            if os.path.dirname(index_file) == model_folder:
+                return index_file
     return ""
-
-
-def save_to_wav(record_button):
-    if record_button is None:
-        pass
-    else:
-        path_to_file = record_button
-        new_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".wav"
-        target_path = os.path.join(audio_root_relative, os.path.basename(new_name))
-
-        shutil.move(path_to_file, target_path)
-        return target_path
-
-
-def save_to_wav2(upload_audio):
-    file_path = upload_audio
-    target_path = os.path.join(audio_root_relative, os.path.basename(file_path))
-
-    if os.path.exists(target_path):
-        os.remove(target_path)
-
-    shutil.copy(file_path, target_path)
-    return target_path
-
-
-def delete_outputs():
-    for root, _, files in os.walk(audio_root_relative, topdown=False):
-        for name in files:
-            if name.endswith(tuple(sup_audioext)) and name.__contains__("_output"):
-                os.remove(os.path.join(root, name))
-    gr.Info(f"Outputs cleared!")
 
 
 def tts_tab():
@@ -197,6 +93,7 @@ def tts_tab():
         with gr.Row():
             model_file = gr.Dropdown(
                 label=i18n("Voice Model"),
+                info=i18n("Select the voice model to use for the conversion."),
                 choices=sorted(names, key=lambda path: os.path.getsize(path)),
                 interactive=True,
                 value=default_weight,
@@ -205,6 +102,7 @@ def tts_tab():
             best_default_index_path = match_index(model_file.value)
             index_file = gr.Dropdown(
                 label=i18n("Index File"),
+                info=i18n("Select the index file to use for the conversion."),
                 choices=get_indexes(),
                 value=best_default_index_path,
                 interactive=True,
@@ -215,13 +113,16 @@ def tts_tab():
             unload_button = gr.Button(i18n("Unload Voice"))
 
             unload_button.click(
-                fn=lambda: ({"value": "", "__type__": "update"}),
+                fn=lambda: (
+                    {"value": "", "__type__": "update"},
+                    {"value": "", "__type__": "update"},
+                ),
                 inputs=[],
-                outputs=[model_file],
+                outputs=[model_file, index_file],
             )
 
             model_file.select(
-                fn=match_index,
+                fn=lambda model_file_value: match_index(model_file_value),
                 inputs=[model_file],
                 outputs=[index_file],
             )
@@ -234,6 +135,7 @@ def tts_tab():
 
     tts_voice = gr.Dropdown(
         label=i18n("TTS Voices"),
+        info=i18n("Select the TTS voice to use for the conversion."),
         choices=short_names,
         interactive=True,
         value=None,
@@ -241,8 +143,14 @@ def tts_tab():
 
     tts_text = gr.Textbox(
         label=i18n("Text to Synthesize"),
+        info=i18n("Enter the text to synthesize."),
         placeholder=i18n("Enter text to synthesize"),
         lines=3,
+    )
+
+    txt_file = gr.File(
+        label=i18n("Or you can upload a .txt file"),
+        type="filepath",
     )
 
     with gr.Accordion(i18n("Advanced Settings"), open=False):
@@ -253,27 +161,67 @@ def tts_tab():
                 value=os.path.join(now_dir, "assets", "audios", "tts_output.wav"),
                 interactive=True,
             )
-
             output_rvc_path = gr.Textbox(
                 label=i18n("Output Path for RVC Audio"),
                 placeholder=i18n("Enter output path"),
                 value=os.path.join(now_dir, "assets", "audios", "tts_rvc_output.wav"),
                 interactive=True,
             )
-
+            split_audio = gr.Checkbox(
+                label=i18n("Split Audio"),
+                info=i18n(
+                    "Split the audio into chunks for inference to obtain better results in some cases."
+                ),
+                visible=True,
+                value=False,
+                interactive=True,
+            )
+            autotune = gr.Checkbox(
+                label=i18n("Autotune"),
+                info=i18n(
+                    "Apply a soft autotune to your inferences, recommended for singing conversions."
+                ),
+                visible=True,
+                value=False,
+                interactive=True,
+            )
+            clean_audio = gr.Checkbox(
+                label=i18n("Clean Audio"),
+                info=i18n(
+                    "Clean your audio output using noise detection algorithms, recommended for speaking audios."
+                ),
+                visible=True,
+                value=True,
+                interactive=True,
+            )
+            clean_strength = gr.Slider(
+                minimum=0,
+                maximum=1,
+                label=i18n("Clean Strength"),
+                info=i18n(
+                    "Set the clean-up level to the audio you want, the more you increase it the more it will clean up, but it is possible that the audio will be more compressed."
+                ),
+                visible=True,
+                value=0.5,
+                interactive=True,
+            )
             pitch = gr.Slider(
                 minimum=-24,
                 maximum=24,
                 step=1,
                 label=i18n("Pitch"),
+                info=i18n(
+                    "Set the pitch of the audio, the higher the value, the higher the pitch."
+                ),
                 value=0,
                 interactive=True,
             )
             filter_radius = gr.Slider(
                 minimum=0,
                 maximum=7,
-                label=i18n(
-                    "If >=3: apply median filtering to the harvested pitch results. The value represents the filter radius and can reduce breathiness"
+                label=i18n("Filter Radius"),
+                info=i18n(
+                    "If the number is greater than or equal to three, employing median filtering on the collected tone results has the potential to decrease respiration."
                 ),
                 value=3,
                 step=1,
@@ -283,7 +231,30 @@ def tts_tab():
                 minimum=0,
                 maximum=1,
                 label=i18n("Search Feature Ratio"),
+                info=i18n(
+                    "Influence exerted by the index file; a higher value corresponds to greater influence. However, opting for lower values can help mitigate artifacts present in the audio."
+                ),
                 value=0.75,
+                interactive=True,
+            )
+            rms_mix_rate = gr.Slider(
+                minimum=0,
+                maximum=1,
+                label=i18n("Volume Envelope"),
+                info=i18n(
+                    "Substitute or blend with the volume envelope of the output. The closer the ratio is to 1, the more the output envelope is employed."
+                ),
+                value=1,
+                interactive=True,
+            )
+            protect = gr.Slider(
+                minimum=0,
+                maximum=0.5,
+                label=i18n("Protect Voiceless Consonants"),
+                info=i18n(
+                    "Safeguard distinct consonants and breathing sounds to prevent electro-acoustic tearing and other artifacts. Pulling the parameter to its maximum value of 0.5 offers comprehensive protection. However, reducing this value might decrease the extent of protection while potentially mitigating the indexing effect."
+                ),
+                value=0.5,
                 interactive=True,
             )
             hop_length = gr.Slider(
@@ -291,34 +262,58 @@ def tts_tab():
                 maximum=512,
                 step=1,
                 label=i18n("Hop Length"),
+                info=i18n(
+                    "Denotes the duration it takes for the system to transition to a significant pitch change. Smaller hop lengths require more time for inference but tend to yield higher pitch accuracy."
+                ),
                 value=128,
                 interactive=True,
             )
-        with gr.Column():
-            f0method = gr.Radio(
-                label=i18n("Pitch extraction algorithm"),
-                choices=[
-                    "pm",
-                    "harvest",
-                    "dio",
-                    "crepe",
-                    "crepe-tiny",
-                    "rmvpe",
-                ],
-                value="rmvpe",
-                interactive=True,
-            )
+            with gr.Column():
+                f0method = gr.Radio(
+                    label=i18n("Pitch extraction algorithm"),
+                    info=i18n(
+                        "Pitch extraction algorithm to use for the audio conversion. The default algorithm is rmvpe, which is recommended for most cases."
+                    ),
+                    choices=[
+                        "pm",
+                        "harvest",
+                        "dio",
+                        "crepe",
+                        "crepe-tiny",
+                        "rmvpe",
+                        "fcpe",
+                        "hybrid[rmvpe+fcpe]",
+                    ],
+                    value="rmvpe",
+                    interactive=True,
+                )
 
     convert_button1 = gr.Button(i18n("Convert"))
 
     with gr.Row():  # Defines output info + output audio download after conversion
-        vc_output1 = gr.Textbox(label=i18n("Output Information"))
+        vc_output1 = gr.Textbox(
+            label=i18n("Output Information"),
+            info=i18n("The output information will be displayed here."),
+        )
         vc_output2 = gr.Audio(label=i18n("Export Audio"))
 
+    def toggle_visible(checkbox):
+        return {"visible": checkbox, "__type__": "update"}
+
+    clean_audio.change(
+        fn=toggle_visible,
+        inputs=[clean_audio],
+        outputs=[clean_strength],
+    )
     refresh_button.click(
         fn=change_choices,
         inputs=[],
         outputs=[model_file, index_file],
+    )
+    txt_file.upload(
+        fn=process_input,
+        inputs=[txt_file],
+        outputs=[tts_text, txt_file],
     )
     convert_button1.click(
         fn=run_tts_script,
@@ -328,12 +323,18 @@ def tts_tab():
             pitch,
             filter_radius,
             index_rate,
+            rms_mix_rate,
+            protect,
             hop_length,
             f0method,
             output_tts_path,
             output_rvc_path,
             model_file,
             index_file,
+            split_audio,
+            autotune,
+            clean_audio,
+            clean_strength,
         ],
         outputs=[vc_output1, vc_output2],
     )
